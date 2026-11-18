@@ -537,13 +537,28 @@ const b64url = buf => { let s = ""; new Uint8Array(buf).forEach(b => s += String
 const rand = n => { const a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a); };
 let tok = null;
 
-async function login(){
+// silent = stille Wieder-Anmeldung (prompt=none): klappt ohne Klick, solange der Browser noch bei Microsoft angemeldet ist.
+async function login(silent = false){
   const verifier = rand(48), st = rand(16);
-  localStorage.setItem("zd_pkce", JSON.stringify({ verifier, st }));
+  localStorage.setItem("zd_pkce", JSON.stringify({ verifier, st, silent }));
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
   const p = new URLSearchParams({ client_id:clientId(), response_type:"code", redirect_uri:REDIRECT, scope:SCOPES,
     code_challenge:challenge, code_challenge_method:"S256", state:st, response_mode:"query" });
+  const user = localStorage.getItem("zd_user");
+  if (user) p.set("login_hint", user);
+  if (silent) p.set("prompt", "none");
   location.assign(AUTH + "/authorize?" + p);
+}
+// Stille Anmeldung höchstens einmal pro Tab-Sitzung versuchen (kein Endlos-Kreislauf), nur wenn ein Konto bekannt ist
+// und kein Refresh-Token mehr vorhanden ist. Nach „Abmelden“ ist kein Konto mehr gespeichert → kein automatisches Anmelden.
+function trySilentLogin(){
+  try {
+    if (!clientId() || !localStorage.getItem("zd_user") || localStorage.getItem("zd_rt")) return false;
+    if (sessionStorage.getItem("zd_silent_tried")) return false;
+    sessionStorage.setItem("zd_silent_tried", "1");
+  } catch(e) { return false; }
+  login(true);
+  return true;
 }
 async function tokenRequest(params){
   const body = new URLSearchParams({ client_id:clientId(), scope:SCOPES, ...params });
@@ -552,16 +567,24 @@ async function tokenRequest(params){
   if (!r.ok) { const e = new Error(j.error_description || j.error || ("Token-Fehler " + r.status)); e.code = j.error; throw e; }
   tok = { at:j.access_token, exp: Date.now() + ((j.expires_in||3600) - 120) * 1000 };
   if (j.refresh_token) localStorage.setItem("zd_rt", j.refresh_token);
+  // Kontoname merken (für login_hint und stille Wieder-Anmeldung)
+  if (j.id_token) { try { const c = JSON.parse(atob(j.id_token.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))); if (c.preferred_username) localStorage.setItem("zd_user", c.preferred_username); } catch(e){} }
 }
 async function handleRedirect(){
   const q = new URLSearchParams(location.search);
   if (!q.has("code") && !q.has("error")) return false;
   history.replaceState(null, "", REDIRECT);
-  if (q.get("error")) throw new Error((q.get("error_description") || q.get("error")).split("\n")[0]);
   const saved = JSON.parse(localStorage.getItem("zd_pkce") || "null");
+  if (q.get("error")) {
+    localStorage.removeItem("zd_pkce");
+    // Stille Anmeldung nicht möglich (keine Microsoft-Sitzung im Browser) → normal den Anmeldeknopf zeigen, ohne Fehlermeldung
+    if (saved && saved.silent && /login_required|interaction_required|consent_required|account_selection_required/.test(q.get("error"))) return false;
+    throw new Error((q.get("error_description") || q.get("error")).split("\n")[0]);
+  }
   if (!saved || saved.st !== q.get("state")) throw new Error("Die Anmeldung konnte nicht zugeordnet werden. Bitte nochmals anmelden.");
   await tokenRequest({ grant_type:"authorization_code", code:q.get("code"), code_verifier:saved.verifier, redirect_uri:REDIRECT });
   localStorage.removeItem("zd_pkce");
+  try { sessionStorage.removeItem("zd_silent_tried"); } catch(e){}
   return true;
 }
 const needLogin = msg => Object.assign(new Error(msg), { needLogin:true });
@@ -684,6 +707,8 @@ async function safeLoad(){
   catch(e) { if (e.needLogin) showWelcome(e.message); else { showWelcome("Fehler beim Laden: " + e.message); } }
 }
 function showWelcome(msg){
+  // Anmeldung abgelaufen? Zuerst still im Hintergrund neu anmelden (siehe trySilentLogin)
+  if (store !== folderStore && store !== filesStore && trySilentLogin()) return;
   $("app").style.display = "none"; $("welcome").style.display = "";
   const h = $("welcomeHint"); h.textContent = msg || ""; h.style.color = msg ? "var(--crit)" : "";
 }
@@ -1013,7 +1038,7 @@ $("btnNewYear").addEventListener("click", ()=>{
 
 $("btnReload").addEventListener("click", ()=>{ if (store.readOnly) { location.reload(); return; } safeLoad(); });
 $("btnChangeFolder").addEventListener("click", openFolderPicker);
-$("btnLogout").addEventListener("click", ()=>{ if (!confirm("Abmelden? Deine Daten bleiben unverändert im OneDrive.")) return; localStorage.removeItem("zd_rt"); tok = null; store = null; showWelcome("Du bist abgemeldet."); });
+$("btnLogout").addEventListener("click", ()=>{ if (!confirm("Abmelden? Deine Daten bleiben unverändert im OneDrive.")) return; localStorage.removeItem("zd_rt"); localStorage.removeItem("zd_user"); tok = null; store = null; showWelcome("Du bist abgemeldet."); });
 $("btnLogin").addEventListener("click", ()=>{ if (!clientId()) { $("setupBox").style.display = ""; $("cidInput").focus(); return; } login(); });
 $("cidSave").addEventListener("click", ()=>{ const v = $("cidInput").value.trim(); if (!/^[0-9a-f-]{36}$/i.test(v)) { $("welcomeHint").textContent = "Das sieht nicht wie eine Client-ID aus (Format xxxxxxxx-xxxx-…)."; return; } localStorage.setItem("zd_client_id", v); $("setupBox").style.display = "none"; login(); });
 $("btnFolder").onclick = pickFolder;
@@ -1025,7 +1050,9 @@ $("fileInput").addEventListener("change", async ev=>{ filesStore.files = [...ev.
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(()=>{});
   if (!clientId()) { $("setupBox").style.display = ""; }
   try { await handleRedirect(); }
-  catch(e) { return showWelcome("Anmeldung fehlgeschlagen: " + e.message); }
+  catch(e) { try { sessionStorage.setItem("zd_silent_tried", "1"); } catch(_){} return showWelcome("Anmeldung fehlgeschlagen: " + e.message); }
+  // Kein gültiger Refresh-Token mehr (z. B. nach 24 h)? → still neu anmelden, ohne Klick
+  if (!localStorage.getItem("zd_rt") && !tok && trySilentLogin()) return;
   if (localStorage.getItem("zd_rt") || tok) {
     const f = JSON.parse(localStorage.getItem("zd_folder") || "null");
     store = graphStore;

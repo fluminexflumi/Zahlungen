@@ -103,6 +103,10 @@ tr.new td{background:var(--goodbg)}
 .welcome .btns{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:22px}
 .files{font-size:12px;color:var(--muted);margin-top:4px}
 #app{display:none}
+#welcome{display:none}
+.booting{max-width:640px;margin:20vh auto;text-align:center;color:var(--text2);font-size:15px}
+.booting .spin{width:28px;height:28px;margin:0 auto 14px;border:3px solid var(--grid);border-top-color:var(--accent);border-radius:50%;animation:zdspin .8s linear infinite}
+@keyframes zdspin{to{transform:rotate(360deg)}}
 .grid > *{min-width:0}
 body{overflow-x:hidden}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:flex-start;justify-content:center;padding:6vh 12px;z-index:60}
@@ -121,6 +125,7 @@ body{overflow-x:hidden}
 </head>
 <body>
 <div class="wrap">
+  <div class="booting" id="booting"><div class="spin"></div>Zahlungen werden geladen …</div>
   <div class="welcome" id="welcome">
     <h1>Zahlungen – Dashboard</h1>
     <p id="welcomeText">Melde dich mit deinem Microsoft-Konto an. Das Dashboard liest deine Jahres-Excels direkt aus deinem OneDrive und trägt neue Rechnungen dort ein.</p>
@@ -698,7 +703,7 @@ async function loadAll(){
   state.stamp = await store.stamp();
   if (!state.view || (state.view !== "all" && !models[state.view])) state.view = models[new Date().getFullYear()] ? new Date().getFullYear() : (state.years[0] ?? "all");
   state.loadedAt = new Date();
-  $("welcome").style.display = "none"; $("app").style.display = "block";
+  $("booting").style.display = "none"; $("welcome").style.display = "none"; $("app").style.display = "block";
   render();
 }
 
@@ -709,7 +714,7 @@ async function safeLoad(){
 function showWelcome(msg){
   // Anmeldung abgelaufen? Zuerst still im Hintergrund neu anmelden (siehe trySilentLogin)
   if (store !== folderStore && store !== filesStore && trySilentLogin()) return;
-  $("app").style.display = "none"; $("welcome").style.display = "";
+  $("booting").style.display = "none"; $("app").style.display = "none"; $("welcome").style.display = "block";
   const h = $("welcomeHint"); h.textContent = msg || ""; h.style.color = msg ? "var(--crit)" : "";
 }
 
@@ -1058,7 +1063,7 @@ $("fileInput").addEventListener("change", async ev=>{ filesStore.files = [...ev.
     store = graphStore;
     if (f) { graphStore.folder = f; await safeLoad(); }
     else { try { await accessToken(); await openFolderPicker(); } catch(e) { showWelcome(e.message); } }
-  }
+  } else showWelcome();   // keine Anmeldung vorhanden und stille Anmeldung nicht möglich → erst jetzt den Anmeldebildschirm zeigen
 })();
 </script>
 </body>
